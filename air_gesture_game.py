@@ -5,12 +5,20 @@ import math
 import random
 import time
 
+# Ensure cv2 constants are available
+try:
+    # Try to access cv2 constants
+    _ = cv2.CAP_PROP_FRAME_WIDTH
+except AttributeError:
+    # If constants are not available, import them
+    import cv2.cv2 as cv2
+
 # Initialize MediaPipe
 mp_hands = mp.solutions.hands
 mp_draw = mp.solutions.drawing_utils
 
 class AirGestureGame:
-    def __init__(self):
+    def __init__(self, dual_hand_mode=False):
         # Game settings
         self.width = 800
         self.height = 600
@@ -18,6 +26,7 @@ class AirGestureGame:
         self.score = 0
         self.lives = 3
         self.level = 1
+        self.dual_hand_mode = dual_hand_mode
         
         # Player settings
         self.player_x = self.width // 2
@@ -30,6 +39,12 @@ class AirGestureGame:
         self.hand_y = 0.5
         self.gesture_state = "none"
         self.last_gesture_time = 0
+        
+        # Dual hand tracking (for dual hand mode)
+        self.left_hand = None
+        self.right_hand = None
+        self.left_gesture = "none"
+        self.right_gesture = "none"
         
         # Game objects
         self.bullets = []
@@ -274,6 +289,10 @@ class AirGestureGame:
                 return "finger_gun"  # Standard shot
         
         return "none"
+    
+    def detect_hand_type(self, hand_landmarks, handedness):
+        """Determine if hand is left or right"""
+        return handedness.classification[0].label
     
     def update_player_position(self, hand_landmarks):
         """Update player position based on hand position"""
@@ -1038,7 +1057,16 @@ class AirGestureGame:
         # Draw UI
         cv2.putText(overlay, f"Score: {self.score}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
         cv2.putText(overlay, f"Lives: {self.lives}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-        cv2.putText(overlay, f"Gesture: {self.gesture_state}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        
+        # Show mode and gesture info
+        mode_text = "DUAL HAND MODE" if self.dual_hand_mode else "SINGLE HAND MODE"
+        cv2.putText(overlay, mode_text, (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        
+        if self.dual_hand_mode:
+            cv2.putText(overlay, f"Left: {self.left_gesture}", (10, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            cv2.putText(overlay, f"Right: {self.right_gesture}", (10, 170), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        else:
+            cv2.putText(overlay, f"Gesture: {self.gesture_state}", (10, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         
         # Game over check
         if self.lives <= 0:
@@ -1062,8 +1090,9 @@ class AirGestureGame:
     
     def run(self):
         """Main game loop"""
+        max_hands = 2 if self.dual_hand_mode else 1
         with mp_hands.Hands(
-            max_num_hands=1,
+            max_num_hands=max_hands,
             model_complexity=1,
             min_detection_confidence=0.7,
             min_tracking_confidence=0.7
@@ -1084,17 +1113,41 @@ class AirGestureGame:
                 
                 # Handle hand tracking
                 if results.multi_hand_landmarks:
-                    hand_landmarks = results.multi_hand_landmarks[0].landmark
-                    
-                    # Update player position
-                    self.update_player_position(hand_landmarks)
-                    
-                    # Detect and handle gestures
-                    gesture = self.detect_gestures(hand_landmarks)
-                    self.handle_gesture(gesture)
-                    
-                    # Draw hand landmarks on camera feed
-                    mp_draw.draw_landmarks(frame, results.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS)
+                    if self.dual_hand_mode and results.multi_handedness:
+                        # Dual hand mode - handle left and right hands separately
+                        self.left_hand = None
+                        self.right_hand = None
+                        self.left_gesture = "none"
+                        self.right_gesture = "none"
+                        
+                        for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
+                            hand_type = self.detect_hand_type(hand_landmarks, handedness)
+                            landmarks = hand_landmarks.landmark
+                            
+                            if hand_type == "Left":
+                                self.left_hand = landmarks
+                                self.left_gesture = self.detect_gestures(landmarks)
+                                self.update_player_position(landmarks)  # Left hand controls movement
+                                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                                
+                            elif hand_type == "Right":
+                                self.right_hand = landmarks
+                                self.right_gesture = self.detect_gestures(landmarks)
+                                self.handle_gesture(self.right_gesture)  # Right hand controls weapons
+                                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                    else:
+                        # Single hand mode - use first detected hand for everything
+                        hand_landmarks = results.multi_hand_landmarks[0].landmark
+                        
+                        # Update player position
+                        self.update_player_position(hand_landmarks)
+                        
+                        # Detect and handle gestures
+                        gesture = self.detect_gestures(hand_landmarks)
+                        self.handle_gesture(gesture)
+                        
+                        # Draw hand landmarks on camera feed
+                        mp_draw.draw_landmarks(frame, results.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS)
                 
                 # Update game logic (only if alive)
                 if self.lives > 0:
@@ -1111,20 +1164,37 @@ class AirGestureGame:
                 game_display[10:160, self.width-210:self.width-10] = small_frame
                 
                 # Show instructions
-                instructions = [
-                    "ENHANCED GESTURE CONTROLS:",
-                    "Move hand = Move player",
-                    "Pinch = Shoot | Tight pinch = Precision shot",
-                    "Thumbs up = Shield | Open palm = Mega shield", 
-                    "Point up/down/left/right = Directional attacks",
-                    "Peace sign = Special | 3/4 fingers = Multi-shot",
-                    "Fist = Power punch | Rock horns = Destroy all",
-                    "Gun shape = Sniper | L-shape = Laser beam",
-                    "OK sign = Perfect shot | Web = Trap enemies",
-                    "Call me = Summon powerup",
-                    "COMBOS: Peace->Fist, Thumbs->Gun, 3->4 fingers",
-                    "ESC=Quit | R=Restart"
-                ]
+                if self.dual_hand_mode:
+                    instructions = [
+                        "DUAL HAND CONTROLS:",
+                        "LEFT HAND: Move player position",
+                        "RIGHT HAND: All weapon gestures",
+                        "Pinch = Shoot | Tight pinch = Precision shot",
+                        "Thumbs up = Shield | Open palm = Mega shield", 
+                        "Point up/down/left/right = Directional attacks",
+                        "Peace sign = Special | 3/4 fingers = Multi-shot",
+                        "Fist = Power punch | Rock horns = Destroy all",
+                        "Gun shape = Sniper | L-shape = Laser beam",
+                        "OK sign = Perfect shot | Web = Trap enemies",
+                        "Call me = Summon powerup",
+                        "COMBOS: Peace->Fist, Thumbs->Gun, 3->4 fingers",
+                        "ESC=Quit | R=Restart"
+                    ]
+                else:
+                    instructions = [
+                        "SINGLE HAND CONTROLS:",
+                        "Move hand = Move player",
+                        "Pinch = Shoot | Tight pinch = Precision shot",
+                        "Thumbs up = Shield | Open palm = Mega shield", 
+                        "Point up/down/left/right = Directional attacks",
+                        "Peace sign = Special | 3/4 fingers = Multi-shot",
+                        "Fist = Power punch | Rock horns = Destroy all",
+                        "Gun shape = Sniper | L-shape = Laser beam",
+                        "OK sign = Perfect shot | Web = Trap enemies",
+                        "Call me = Summon powerup",
+                        "COMBOS: Peace->Fist, Thumbs->Gun, 3->4 fingers",
+                        "ESC=Quit | R=Restart"
+                    ]
                 
                 for i, instruction in enumerate(instructions):
                     cv2.putText(game_display, instruction, (10, self.height - 140 + i * 20), 
